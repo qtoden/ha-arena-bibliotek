@@ -32,7 +32,7 @@ Visar dina **boklån, reservationer och avgifter** från bibliotek som använder
 
 Varje lån och reservation har attributet `cover`, en adress i Home Assistant
 (`/api/arena_bibliotek/cover/<post-id>`) till bokens omslag. Biblioteket skickar omslagen utan
-cache-huvuden, så integrationen hämtar varje omslag en gång, förminskar det till högst 400 px och
+cache-huvuden, så integrationen hämtar varje omslag en gång, förminskar det till högst 600 × 800 px och
 sparar det i Home Assistants cache-katalog (`.cache/arena_bibliotek/covers`, ingår inte i
 säkerhetskopior). Sedan svarar Home Assistant själv, med lång cachetid i webbläsaren. Bara
 poster som finns på ett kort hämtas. Saknar boken omslag är `cover` ändå satt men svarar 404,

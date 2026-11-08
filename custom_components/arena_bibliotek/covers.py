@@ -36,7 +36,7 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 VALID_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-MAX_SIZE = (400, 400)  # width, height in pixels: about the size Arena has, for a large view
+MAX_SIZE = (600, 800)  # width, height in pixels: twice the 300 px large view, for sharp phone screens
 NO_COVER_RETRY = timedelta(days=7)
 KEEP_UNUSED = timedelta(days=30)
 CACHE_HEADERS = {"Cache-Control": "public, max-age=2592000, immutable"}
