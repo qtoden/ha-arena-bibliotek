@@ -10,6 +10,8 @@ used to make HA fetch anything else. It needs no login, like HA's own brand imag
 <img> cannot send a token; covers are public on the library's site anyway. Records without a
 cover are asked for again after a day, because covers come and go at the library's end. Errors
 are not taken for a missing cover, and after a 429 no cover is fetched until Retry-After has passed.
+Requests to the library go one at a time, at least a second apart, so a long list of loans shown for
+the first time does not arrive at the library as a burst.
 Covers of records that left every list are removed after 30 days.
 
 The action arena_bibliotek.clear_covers empties the cache, for a cover the library has added or
@@ -46,6 +48,7 @@ NO_COVER_RETRY = timedelta(days=1)
 KEEP_UNUSED = timedelta(days=30)
 CACHE_HEADERS = {"Cache-Control": "public, max-age=2592000, immutable"}
 CACHE_FILES = (".jpg", ".none", ".tmp")
+FETCH_INTERVAL = 1.0  # seconds between requests to the library
 SIZE_FILE = "size"  # the MAX_SIZE the cached covers were made at
 
 
@@ -109,6 +112,8 @@ class CoverView(HomeAssistantView):
         self.dir = _cover_dir(hass)
         self._locks: dict[str, asyncio.Lock] = {}
         self._paused_until = 0.0  # set by a 429 from the library
+        self._library = asyncio.Lock()  # one request to the library at a time
+        self._last_fetch = 0.0
 
     async def get(self, request: web.Request, record_id: str) -> web.StreamResponse:
         if not VALID_ID.match(record_id):
@@ -135,11 +140,16 @@ class CoverView(HomeAssistantView):
         marker = path.with_suffix(".none")
         if await self.hass.async_add_executor_job(self._recent, marker):
             return None
-        if time.monotonic() < self._paused_until:
-            return None
         coordinator, agency = owner
         try:
-            data = await coordinator.client.fetch_cover(record_id, agency)
+            async with self._library:
+                if time.monotonic() < self._paused_until:
+                    return None
+                await asyncio.sleep(max(0.0, self._last_fetch + FETCH_INTERVAL - time.monotonic()))
+                try:
+                    data = await coordinator.client.fetch_cover(record_id, agency)
+                finally:
+                    self._last_fetch = time.monotonic()
         except ArenaRateLimited as err:
             self._paused_until = time.monotonic() + err.retry_after
             _LOGGER.debug("Library rate limits covers; pausing %.0f s", err.retry_after)

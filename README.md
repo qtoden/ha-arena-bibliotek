@@ -38,7 +38,8 @@ säkerhetskopior). Sedan svarar Home Assistant själv, med lång cachetid i webb
 poster som finns på ett kort hämtas. Saknar boken omslag är `cover` ändå satt men svarar 404,
 och biblioteket tillfrågas igen efter ett dygn (omslag kommer och går hos biblioteket). Fel och
 "för många anrop" (429) räknas inte som saknat omslag, och efter 429 väntar integrationen den tid
-biblioteket anger. Omslag till böcker som inte längre finns
+biblioteket anger. Biblioteket tillfrågas om ett omslag i taget, med minst en sekund emellan, så
+en lång lånelista som visas första gången inte blir en skur av anrop. Omslag till böcker som inte längre finns
 på något kort tas bort efter 30 dagar.
 
 Har biblioteket lagt till eller bytt ett omslag tömmer åtgärden `arena_bibliotek.clear_covers`
