@@ -8,7 +8,9 @@ directory; later requests are answered from there, with a long browser cache tim
 Only records that are on a loaded card's loans or reservations are fetched, so the view cannot be
 used to make HA fetch anything else. It needs no login, like HA's own brand images, because an
 <img> cannot send a token; covers are public on the library's site anyway. Records without a
-cover are remembered for a week. Covers of records that left every list are removed after 30 days.
+cover are asked for again after a day, because covers come and go at the library's end. Errors
+are not taken for a missing cover, and after a 429 no cover is fetched until Retry-After has passed.
+Covers of records that left every list are removed after 30 days.
 
 The action arena_bibliotek.clear_covers empties the cache, for a cover the library has added or
 changed. The cache also empties itself at startup when MAX_SIZE has changed since it was filled.
@@ -33,14 +35,14 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 
-from .api import ArenaError
+from .api import ArenaError, ArenaRateLimited
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
 VALID_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 MAX_SIZE = (600, 800)  # width, height in pixels: twice the 300 px large view, for sharp phone screens
-NO_COVER_RETRY = timedelta(days=7)
+NO_COVER_RETRY = timedelta(days=1)
 KEEP_UNUSED = timedelta(days=30)
 CACHE_HEADERS = {"Cache-Control": "public, max-age=2592000, immutable"}
 CACHE_FILES = (".jpg", ".none", ".tmp")
@@ -106,6 +108,7 @@ class CoverView(HomeAssistantView):
         self.hass = hass
         self.dir = _cover_dir(hass)
         self._locks: dict[str, asyncio.Lock] = {}
+        self._paused_until = 0.0  # set by a 429 from the library
 
     async def get(self, request: web.Request, record_id: str) -> web.StreamResponse:
         if not VALID_ID.match(record_id):
@@ -132,9 +135,15 @@ class CoverView(HomeAssistantView):
         marker = path.with_suffix(".none")
         if await self.hass.async_add_executor_job(self._recent, marker):
             return None
+        if time.monotonic() < self._paused_until:
+            return None
         coordinator, agency = owner
         try:
             data = await coordinator.client.fetch_cover(record_id, agency)
+        except ArenaRateLimited as err:
+            self._paused_until = time.monotonic() + err.retry_after
+            _LOGGER.debug("Library rate limits covers; pausing %.0f s", err.retry_after)
+            return None
         except ArenaError as err:
             _LOGGER.debug("No cover for %s: %s", record_id, err)
             return None  # a network problem: try again on the next request

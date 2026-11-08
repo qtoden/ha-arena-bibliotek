@@ -36,7 +36,9 @@ cache-huvuden, så integrationen hämtar varje omslag en gång, förminskar det 
 sparar det i Home Assistants cache-katalog (`.cache/arena_bibliotek/covers`, ingår inte i
 säkerhetskopior). Sedan svarar Home Assistant själv, med lång cachetid i webbläsaren. Bara
 poster som finns på ett kort hämtas. Saknar boken omslag är `cover` ändå satt men svarar 404,
-och biblioteket tillfrågas igen först efter en vecka. Omslag till böcker som inte längre finns
+och biblioteket tillfrågas igen efter ett dygn (omslag kommer och går hos biblioteket). Fel och
+"för många anrop" (429) räknas inte som saknat omslag, och efter 429 väntar integrationen den tid
+biblioteket anger. Omslag till böcker som inte längre finns
 på något kort tas bort efter 30 dagar.
 
 Har biblioteket lagt till eller bytt ett omslag tömmer åtgärden `arena_bibliotek.clear_covers`

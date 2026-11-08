@@ -38,6 +38,14 @@ class ArenaAuthError(ArenaError):
     """Login rejected (wrong card number/PIN)."""
 
 
+class ArenaRateLimited(ArenaError):
+    """The library answered 429 Too Many Requests."""
+
+    def __init__(self, retry_after: float) -> None:
+        super().__init__(f"Rate limited, retry after {retry_after:.0f} s")
+        self.retry_after = retry_after
+
+
 @dataclass
 class Loan:
     """One borrowed item."""
@@ -335,13 +343,23 @@ class ArenaClient:
         return data
 
     async def fetch_cover(self, record_id: str, agency: str) -> bytes | None:
-        """A record's cover image, or None when the library has none. Needs no login."""
+        """A record's cover image, or None when the library answers with its no-cover placeholder.
+
+        Anything else (rate limiting, server errors, an unexpected answer) raises, so that it is not
+        taken for a missing cover. Needs no login.
+        """
         params = {"resource": "resourceCover", "recordId": record_id, "agencyName": agency}
         try:
             async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT) as session:
                 async with session.get(self.base_url + COVER_PATH, params=params) as resp:
+                    if resp.status == 429:
+                        try:
+                            retry_after = float(resp.headers.get("Retry-After", 60))
+                        except ValueError:
+                            retry_after = 60
+                        raise ArenaRateLimited(retry_after)
                     if resp.status != 200 or not resp.content_type.startswith("image/"):
-                        return None
+                        raise ArenaError(f"Cover request returned HTTP {resp.status} {resp.content_type}")
                     data = await resp.read()
         except (asyncio.TimeoutError, aiohttp.ClientError) as err:
             raise ArenaError(f"Cover request failed: {err}") from err
