@@ -39,6 +39,10 @@ poster som finns på ett kort hämtas. Saknar boken omslag är `cover` ändå sa
 och biblioteket tillfrågas igen först efter en vecka. Omslag till böcker som inte längre finns
 på något kort tas bort efter 30 dagar.
 
+Har biblioteket lagt till eller bytt ett omslag tömmer åtgärden `arena_bibliotek.clear_covers`
+cachen, och varje omslag hämtas igen nästa gång det visas. Cachen töms också av sig själv vid
+start om den största storleken har ändrats i en ny version.
+
 ## Cache
 
 Senaste hämtningen sparas i Home Assistant (`.storage`). Efter en omstart visas lånen direkt, och

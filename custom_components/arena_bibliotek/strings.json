@@ -79,6 +79,10 @@
           "description": "Show what would be renewed without doing it."
         }
       }
+    },
+    "clear_covers": {
+      "name": "Clear covers",
+      "description": "Removes the cached cover images, for example after the library has added or changed a cover. Each cover is fetched again the next time it is shown."
     }
   }
 }

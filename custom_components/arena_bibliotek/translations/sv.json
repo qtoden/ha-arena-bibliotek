@@ -79,6 +79,10 @@
           "description": "Visa vad som skulle lånas om utan att göra det."
         }
       }
+    },
+    "clear_covers": {
+      "name": "Töm omslag",
+      "description": "Tar bort sparade omslagsbilder, till exempel när biblioteket har lagt till eller bytt ett omslag. Varje omslag hämtas igen nästa gång det visas."
     }
   }
 }

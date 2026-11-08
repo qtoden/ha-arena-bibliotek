@@ -21,3 +21,5 @@ renew:
       default: false
       selector:
         boolean:
+
+clear_covers: {}

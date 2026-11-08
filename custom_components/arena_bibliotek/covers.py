@@ -9,6 +9,9 @@ Only records that are on a loaded card's loans or reservations are fetched, so t
 used to make HA fetch anything else. It needs no login, like HA's own brand images, because an
 <img> cannot send a token; covers are public on the library's site anyway. Records without a
 cover are remembered for a week. Covers of records that left every list are removed after 30 days.
+
+The action arena_bibliotek.clear_covers empties the cache, for a cover the library has added or
+changed. The cache also empties itself at startup when MAX_SIZE has changed since it was filled.
 """
 
 from __future__ import annotations
@@ -40,6 +43,8 @@ MAX_SIZE = (600, 800)  # width, height in pixels: twice the 300 px large view, f
 NO_COVER_RETRY = timedelta(days=7)
 KEEP_UNUSED = timedelta(days=30)
 CACHE_HEADERS = {"Cache-Control": "public, max-age=2592000, immutable"}
+CACHE_FILES = (".jpg", ".none", ".tmp")
+SIZE_FILE = "size"  # the MAX_SIZE the cached covers were made at
 
 
 def cover_url(record_id: str | None) -> str | None:
@@ -162,7 +167,44 @@ async def async_prune(hass: HomeAssistant) -> None:
             return
         cutoff = time.time() - KEEP_UNUSED.total_seconds()
         for file in folder.iterdir():
-            if file.stem not in keep and file.stat().st_mtime < cutoff:
+            if file.suffix in CACHE_FILES and file.stem not in keep and file.stat().st_mtime < cutoff:
                 file.unlink(missing_ok=True)
 
     await hass.async_add_executor_job(prune)
+
+
+def _clear(folder: Path) -> int:
+    """Remove every cached cover and no-cover marker; return how many covers there were."""
+    removed = 0
+    if folder.is_dir():
+        for file in folder.iterdir():
+            if file.suffix in CACHE_FILES:
+                removed += file.suffix == ".jpg"
+                file.unlink(missing_ok=True)
+    return removed
+
+
+async def async_clear(hass: HomeAssistant) -> int:
+    """Empty the cache; each cover is fetched again the next time it is shown."""
+    removed = await hass.async_add_executor_job(_clear, _cover_dir(hass))
+    _LOGGER.info("Removed %s cached covers", removed)
+    return removed
+
+
+async def async_check_size(hass: HomeAssistant) -> None:
+    """Empty the cache if it was filled with another MAX_SIZE, so covers come back at the new size."""
+    folder = _cover_dir(hass)
+    size = f"{MAX_SIZE[0]}x{MAX_SIZE[1]}"
+
+    def check() -> int | None:
+        marker = folder / SIZE_FILE
+        if marker.is_file() and marker.read_text().strip() == size:
+            return None
+        removed = _clear(folder)
+        folder.mkdir(parents=True, exist_ok=True)
+        marker.write_text(size)
+        return removed
+
+    removed = await hass.async_add_executor_job(check)
+    if removed:
+        _LOGGER.info("Cover size is now %s; removed %s covers made at another size", size, removed)

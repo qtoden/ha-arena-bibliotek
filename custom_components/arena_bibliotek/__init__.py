@@ -17,7 +17,7 @@ from homeassistant.helpers.typing import ConfigType
 from .api import ArenaClient, ArenaError, Loan
 from .const import CONF_BASE_URL, DOMAIN
 from .coordinator import ArenaCoordinator
-from .covers import CoverView
+from .covers import CoverView, async_check_size, async_clear
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ PLATFORMS = [Platform.SENSOR, Platform.BUTTON]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 SERVICE_RENEW = "renew"
+SERVICE_CLEAR_COVERS = "clear_covers"
 EVENT_RENEWED = f"{DOMAIN}_renewed"
 ATTR_ENTRY = "config_entry_id"
 ATTR_TITLES = "titles"
@@ -86,8 +87,16 @@ async def async_renew(
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register the renew action and the cover images once for all library cards."""
+    """Register the actions and the cover images once for all library cards."""
+    await async_check_size(hass)
     hass.http.register_view(CoverView(hass))
+
+    async def handle_clear_covers(call: ServiceCall) -> ServiceResponse:
+        return {"removed": await async_clear(hass)}
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_CLEAR_COVERS, handle_clear_covers, supports_response=SupportsResponse.OPTIONAL
+    )
 
     async def handle_renew(call: ServiceCall) -> ServiceResponse:
         entries: list[ArenaConfigEntry] = [
