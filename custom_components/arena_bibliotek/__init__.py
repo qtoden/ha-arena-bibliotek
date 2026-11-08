@@ -17,6 +17,7 @@ from homeassistant.helpers.typing import ConfigType
 from .api import ArenaClient, ArenaError, Loan
 from .const import CONF_BASE_URL, DOMAIN
 from .coordinator import ArenaCoordinator
+from .covers import CoverView
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -85,7 +86,8 @@ async def async_renew(
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register the renew action once for all library cards."""
+    """Register the renew action and the cover images once for all library cards."""
+    hass.http.register_view(CoverView(hass))
 
     async def handle_renew(call: ServiceCall) -> ServiceResponse:
         entries: list[ArenaConfigEntry] = [

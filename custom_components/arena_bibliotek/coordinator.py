@@ -18,6 +18,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import AccountData, ArenaAuthError, ArenaClient, ArenaError
 from .const import DOMAIN, UPDATE_INTERVAL
+from .covers import async_prune
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -74,4 +75,5 @@ class ArenaCoordinator(DataUpdateCoordinator[AccountData]):
         self.stale = False
         self.update_interval = UPDATE_INTERVAL
         await self.async_save(data)
+        self.hass.async_create_background_task(async_prune(self.hass), f"{DOMAIN} prune covers")
         return data

@@ -19,7 +19,7 @@ Visar dina **boklån, reservationer och avgifter** från bibliotek som använder
 
 | Entitet | Innehåll |
 |---|---|
-| `sensor.…_lan` | Antal lån. Attributet `loans` listar varje lån: titel, författare, medietyp, lånedatum, **återlämningsdatum**, om det går att låna om och antal omlån kvar |
+| `sensor.…_lan` | Antal lån. Attributet `loans` listar varje lån: titel, författare, medietyp, lånedatum, **återlämningsdatum**, om det går att låna om, antal omlån kvar, post-id och omslag (`cover`) |
 | `sensor.…_nasta_aterlamning` | Datum för nästa återlämning, med titlar och `days_left` |
 | `sensor.…_reservationer` | Antal reservationer |
 | `sensor.…_reservationer_att_hamta` | Reservationer som är klara att hämta |
@@ -27,6 +27,17 @@ Visar dina **boklån, reservationer och avgifter** från bibliotek som använder
 | `sensor.…_senast_uppdaterad` | När data senast hämtades från biblioteket (diagnostik) |
 | `button.…_uppdatera` | Hämtar direkt (annars var 6:e timme) |
 | `button.…_lana_om_alla` | Lånar om alla lån som går att låna om |
+
+## Omslag
+
+Varje lån och reservation har attributet `cover`, en adress i Home Assistant
+(`/api/arena_bibliotek/cover/<post-id>`) till bokens omslag. Biblioteket skickar omslagen utan
+cache-huvuden, så integrationen hämtar varje omslag en gång, förminskar det till högst 240 px och
+sparar det i Home Assistants cache-katalog (`.cache/arena_bibliotek/covers`, ingår inte i
+säkerhetskopior). Sedan svarar Home Assistant själv, med lång cachetid i webbläsaren. Bara
+poster som finns på ett kort hämtas. Saknar boken omslag är `cover` ändå satt men svarar 404,
+och biblioteket tillfrågas igen först efter en vecka. Omslag till böcker som inte längre finns
+på något kort tas bort efter 30 dagar.
 
 ## Cache
 

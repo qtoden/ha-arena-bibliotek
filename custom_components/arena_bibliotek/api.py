@@ -19,11 +19,15 @@ from bs4 import BeautifulSoup, Tag
 _LOGGER = logging.getLogger(__name__)
 
 OVERVIEW_PATH = "/protected/my-account/overview"
+COVER_PATH = "/o/arena-portlet/portletResources"
 START_PATH = "/"
 USER_AGENT = "Mozilla/5.0 (Home Assistant arena_bibliotek)"
 TIMEOUT = aiohttp.ClientTimeout(total=60)  # Arena logins can be slow
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_AGENCY_RE = re.compile(r"arena_agency_name=([A-Za-z0-9_]+)")
+# Arena answers a record without a cover with a small placeholder GIF
+MIN_COVER_BYTES = 1000
 
 
 class ArenaError(Exception):
@@ -53,10 +57,9 @@ class Loan:
     checkbox_value: str | None = field(default=None, repr=False)
 
     def as_dict(self) -> dict:
-        """Attribute-friendly dict (dates as ISO strings, no internal ids)."""
+        """Attribute-friendly dict (dates as ISO strings, no form values)."""
         d = asdict(self)
         d.pop("checkbox_value", None)
-        d.pop("record_id", None)
         for key in ("loan_date", "due_date"):
             d[key] = d[key].isoformat() if d[key] else None
         return d
@@ -72,6 +75,7 @@ class Reservation:
     pickup_branch: str | None
     ready: bool
     pickup_by: date | None
+    record_id: str | None = None
 
     def as_dict(self) -> dict:
         d = asdict(self)
@@ -87,6 +91,7 @@ class AccountData:
     reservations: list[Reservation]
     fees: float | None
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    agency: str | None = None  # the library's agency name, needed for cover images
 
     def to_storage(self) -> dict:
         """JSON-safe dict for the on-disk cache (keeps renewal checkbox values out)."""
@@ -95,6 +100,7 @@ class AccountData:
             "reservations": [r.as_dict() for r in self.reservations],
             "fees": self.fees,
             "fetched_at": self.fetched_at.isoformat(),
+            "agency": self.agency,
         }
 
     @classmethod
@@ -104,7 +110,7 @@ class AccountData:
 
         loans = [
             Loan(**{**l, "loan_date": _d(l.get("loan_date")), "due_date": _d(l.get("due_date")),
-                    "record_id": None, "checkbox_value": None})
+                    "record_id": l.get("record_id"), "checkbox_value": None})
             for l in data.get("loans", [])
         ]
         reservations = [
@@ -115,6 +121,7 @@ class AccountData:
             reservations=reservations,
             fees=data.get("fees"),
             fetched_at=datetime.fromisoformat(data["fetched_at"]),
+            agency=data.get("agency"),
         )
 
 
@@ -201,6 +208,7 @@ def parse_reservations(soup: BeautifulSoup) -> list[Reservation]:
                 or _value(item, "arena-record-branch"),
                 ready=ready,
                 pickup_by=_date(_text(item.select_one("[class*=expire], [class*=pickup], [class*=date]"))),
+                record_id=_text(item.select_one(".arena-record-id")),
             )
         )
     return result
@@ -221,10 +229,12 @@ def parse_overview(html_text: str) -> AccountData:
     # form again, while the portlet frames are still rendered empty)
     if soup.select_one("input.arena-login-password"):
         raise ArenaAuthError("Not logged in (wrong card number/PIN?)")
+    agency = _AGENCY_RE.search(html_text)
     return AccountData(
         loans=parse_loans(soup),
         reservations=parse_reservations(soup),
         fees=parse_fees(soup),
+        agency=agency.group(1) if agency else None,
     )
 
 
@@ -323,6 +333,19 @@ class ArenaClient:
             len(data.loans), len(data.reservations), data.fees,
         )
         return data
+
+    async def fetch_cover(self, record_id: str, agency: str) -> bytes | None:
+        """A record's cover image, or None when the library has none. Needs no login."""
+        params = {"resource": "resourceCover", "recordId": record_id, "agencyName": agency}
+        try:
+            async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT) as session:
+                async with session.get(self.base_url + COVER_PATH, params=params) as resp:
+                    if resp.status != 200 or not resp.content_type.startswith("image/"):
+                        return None
+                    data = await resp.read()
+        except (asyncio.TimeoutError, aiohttp.ClientError) as err:
+            raise ArenaError(f"Cover request failed: {err}") from err
+        return data if len(data) >= MIN_COVER_BYTES else None
 
     async def renew(
         self,

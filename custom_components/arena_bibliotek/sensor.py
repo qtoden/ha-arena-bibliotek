@@ -18,6 +18,7 @@ from . import ArenaConfigEntry
 from .api import AccountData
 from .const import DOMAIN
 from .coordinator import ArenaCoordinator
+from .covers import cover_url
 
 
 def _next_due(d: AccountData) -> date | None:
@@ -28,7 +29,7 @@ def _next_due(d: AccountData) -> date | None:
 def _loans_attrs(d: AccountData) -> dict[str, Any]:
     nxt = _next_due(d)
     return {
-        "loans": [l.as_dict() for l in d.loans],
+        "loans": [{**l.as_dict(), "cover": cover_url(l.record_id)} for l in d.loans],
         "overdue": sum(1 for l in d.loans if l.overdue),
         "due_next": [l.title for l in d.loans if l.due_date and l.due_date == nxt],
         "not_renewable": [l.title for l in d.loans if not l.renewable],
@@ -74,7 +75,7 @@ SENSORS: tuple[ArenaSensorDescription, ...] = (
         icon="mdi:book-clock",
         native_unit_of_measurement="st",
         value_fn=lambda d: len(d.reservations),
-        attrs_fn=lambda d: {"reservations": [r.as_dict() for r in d.reservations]},
+        attrs_fn=lambda d: {"reservations": [{**r.as_dict(), "cover": cover_url(r.record_id)} for r in d.reservations]},
     ),
     ArenaSensorDescription(
         key="reservations_ready",
