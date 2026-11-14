@@ -28,6 +28,12 @@ _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _AGENCY_RE = re.compile(r"arena_agency_name=([A-Za-z0-9_]+)")
 # Arena answers a record without a cover with a small placeholder GIF
 MIN_COVER_BYTES = 1000
+_AJAX_GET_RE = re.compile(r"wicketAjaxGet\('([^']+)'")
+_TICKED_RE = re.compile(r"(\d+)\s+markerade")
+# The HTML of each re-rendered component in a Wicket <ajax-response>
+_COMPONENT_RE = re.compile(r"<component\b[^>]*>\s*<!\[CDATA\[(.*?)\]\]>\s*</component>", re.S)
+# Pause between the requests of one renewal; the library answers 429 to about ten quick ones
+REQUEST_DELAY = 1.0
 
 
 class ArenaError(Exception):
@@ -285,6 +291,49 @@ def _renew_form(soup: BeautifulSoup) -> tuple[str, list[tuple[str, str]], str]:
     return form["action"], fields, submit["name"]
 
 
+def _button_disabled(soup: BeautifulSoup, name: str) -> bool:
+    button = soup.find("input", attrs={"type": "submit", "name": name})
+    return button is not None and button.has_attr("disabled")
+
+
+def _tick_url(soup: BeautifulSoup, checkbox_value: str) -> str | None:
+    """The Wicket AJAX URL a browser calls when the loan's checkbox is clicked, if it has one."""
+    checkbox = soup.find("input", attrs={"name": "loansCheckboxGroup", "value": checkbox_value})
+    m = _AJAX_GET_RE.search(checkbox.get("onclick", "")) if checkbox else None
+    return m.group(1) if m else None
+
+
+def _tick_result(xml_text: str, button_name: str) -> tuple[bool, int | None]:
+    """From a checkbox's AJAX answer: is the renew button enabled now, and how many are ticked."""
+    enabled, ticked = False, None
+    for markup in _COMPONENT_RE.findall(xml_text):
+        part = BeautifulSoup(markup, "html.parser")
+        button = part.find("input", attrs={"name": button_name})
+        if button is not None:
+            enabled = not button.has_attr("disabled")
+        if m := _TICKED_RE.search(part.get_text(" ", strip=True)):
+            ticked = int(m.group(1))
+    return enabled, ticked
+
+
+def _loans_feedback(html_text: str) -> list[str]:
+    """Messages the loans portlet shows after a renewal (e.g. why a loan was not renewed)."""
+    soup = BeautifulSoup(html_text, "html.parser")
+    portlet = soup.find(id=re.compile(r"^p_p_id_loans"))
+    if portlet is None:
+        return []
+    messages = []
+    for panel in portlet.select(".feedbackPanel"):
+        items = panel.find_all("li") or [panel]
+        messages += [t for t in (_text(i) for i in items) if t]
+    return messages
+
+
+def _check(resp: aiohttp.ClientResponse, what: str) -> None:
+    if resp.status == 429:
+        raise ArenaError("Biblioteket tar inte emot fler förfrågningar just nu; försök igen om en stund")
+    if resp.status >= 400:
+        raise ArenaError(f"{what} gav HTTP {resp.status}")
 
 
 class ArenaClient:
@@ -373,6 +422,10 @@ class ArenaClient:
         """Log in, tick the chosen renewable loans and submit "Låna om" in the same session.
 
         `choose(loan) -> bool` picks loans. Non-renewable loans are reported but never submitted.
+        If the renew button arrives disabled (as on biblioteklb.se, which enables it server-side as
+        boxes are ticked), each loan is ticked through the checkbox's own AJAX call first, as a
+        browser does, and the library's count of ticked loans is checked before submitting.
+        Otherwise the form is posted directly, as before.
         With dry_run=True everything except the final POST runs (nothing is renewed).
         """
         jar = aiohttp.CookieJar()
@@ -382,6 +435,7 @@ class ArenaClient:
             try:
                 await self._login(session)
                 async with session.get(self.base_url + OVERVIEW_PATH) as resp:
+                    _check(resp, "Kontosidan")
                     before_html = await resp.text()
                 before = parse_overview(before_html)
                 soup = BeautifulSoup(before_html, "html.parser")
@@ -393,31 +447,65 @@ class ArenaClient:
                 to_renew = [l for l in chosen if l.renewable and l.checkbox_value]
                 if not to_renew:
                     return outcomes, before
-                action, fields, _ = _renew_form(soup)
+                action, fields, button = _renew_form(soup)
                 fields += [("loansCheckboxGroup", l.checkbox_value) for l in to_renew]
+                ticked = await self._tick(session, soup, button, to_renew) if _button_disabled(soup, button) else None
                 if dry_run:
+                    note = f"{ticked} markerade hos biblioteket, " if ticked is not None else ""
                     _LOGGER.debug("Dry run: would POST %s fields to %s", len(fields), action.split("?")[0])
                     return outcomes + [
-                        RenewOutcome(l.title, False, l.due_date, l.due_date, "Testkörning – inget skickades")
+                        RenewOutcome(l.title, False, l.due_date, l.due_date, f"Testkörning – {note}inget skickades")
                         for l in to_renew
                     ], before
                 async with session.post(action, data=fields) as resp:
-                    if resp.status >= 400:
-                        raise ArenaError(f"Renewal returned HTTP {resp.status}")
-                    await resp.read()
+                    _check(resp, "Omlånet")
+                    feedback = _loans_feedback(await resp.text())
+                if feedback:
+                    _LOGGER.info("Arena renewal: %s", "; ".join(feedback))
+                await asyncio.sleep(REQUEST_DELAY)
                 # Read the account again for the authoritative result
                 async with session.get(self.base_url + OVERVIEW_PATH) as resp:
+                    _check(resp, "Kontosidan")
                     after = parse_overview(await resp.text())
             except asyncio.TimeoutError as err:
-                raise ArenaError("The library site did not answer in time") from err
+                raise ArenaError("Biblioteket svarade inte i tid") from err
             except aiohttp.ClientError as err:
-                raise ArenaError(f"Connection error: {err}") from err
+                raise ArenaError(f"Kunde inte nå biblioteket: {err}") from err
         by_key = {(l.record_id or l.title): l for l in after.loans}
         for l in to_renew:
             new = by_key.get(l.record_id or l.title)
             new_due = new.due_date if new else None
             renewed = bool(new_due and l.due_date and new_due > l.due_date)
-            outcomes.append(
-                RenewOutcome(l.title, renewed, l.due_date, new_due, None if renewed else (new.status if new else "Hittades inte efter omlån"))
-            )
+            if renewed:
+                message = None
+            elif new is None:
+                message = "Syns inte längre bland lånen"
+            else:
+                # The library's own words, preferably those naming this loan
+                about = [m for m in feedback if l.title.casefold() in m.casefold()]
+                message = "; ".join(about or feedback) or "Biblioteket lånade inte om boken"
+            outcomes.append(RenewOutcome(l.title, renewed, l.due_date, new_due, message))
         return outcomes, after
+
+    async def _tick(
+        self, session: aiohttp.ClientSession, soup: BeautifulSoup, button: str, loans: list[Loan]
+    ) -> int:
+        """Tick each loan's checkbox through its AJAX call, so the library enables the renew button.
+
+        Raises unless the button ends up enabled with exactly these loans ticked, so nothing
+        half-chosen is ever submitted. The ticks only live in this login session.
+        """
+        enabled, ticked = False, None
+        for loan in loans:
+            url = _tick_url(soup, loan.checkbox_value)
+            if url is None:
+                raise ArenaError(f"Kryssrutan för {loan.title} hittades inte")
+            await asyncio.sleep(REQUEST_DELAY)
+            async with session.get(url, headers={"Wicket-Ajax": "true"}) as resp:
+                _check(resp, "Att markera en bok")
+                enabled, ticked = _tick_result(await resp.text(), button)
+        if not enabled:
+            raise ArenaError("Biblioteket aktiverade inte Låna om-knappen; inget skickades")
+        if ticked is not None and ticked != len(loans):
+            raise ArenaError(f"Biblioteket markerade {ticked} av {len(loans)} böcker; inget skickades")
+        return ticked if ticked is not None else len(loans)
