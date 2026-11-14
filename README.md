@@ -48,6 +48,13 @@ response_variable: resultat
 ```
 
 Svaret innehåller per lån: `renewed`, `old_due_date`, `new_due_date` och bibliotekets meddelande.
+`renewed` bygger på återlämningsdatumet när kontot läses om efteråt, inte på bibliotekets svar.
+
+På bibliotek där knappen Låna om är avstängd tills något lån är markerat (t.ex. biblioteklb.se)
+markeras lånen först ett i taget, som i en webbläsare, med en sekunds paus mellan förfrågningarna.
+Då markerar också en testkörning lånen hos biblioteket och kontrollerar antalet, men skickar
+inget. Markeringarna gäller bara den inloggningen.
+
 Efter varje omlån skickas händelsen `arena_bibliotek_renewed` (antal omlånade/misslyckade + detaljer).
 
 ### Exempel: låna om automatiskt och få en notis
