@@ -8,6 +8,8 @@ Arena has no public patron API, so this logs in through the normal web form
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+import contextlib
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 import logging
@@ -30,6 +32,8 @@ _TICKED_RE = re.compile(r"(\d+)\s+markerade")
 _COMPONENT_RE = re.compile(r"<component\b[^>]*>\s*<!\[CDATA\[(.*?)\]\]>\s*</component>", re.S)
 # Pause between the requests of one renewal; the library answers 429 to about ten quick ones
 REQUEST_DELAY = 1.0
+# Pause between two logins to the same site. Logins take turns (see _turn) for the same reason.
+SESSION_GAP = 5.0
 
 
 class ArenaError(Exception):
@@ -318,6 +322,39 @@ def _check(resp: aiohttp.ClientResponse, what: str) -> None:
         raise ArenaError(f"{what} gav HTTP {resp.status}")
 
 
+class _Site:
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.free_at = 0.0  # loop time from which the next login may start
+
+
+_SITES: dict[str, _Site] = {}
+
+
+@contextlib.asynccontextmanager
+async def _turn(base_url: str):
+    """One login session at a time per library site, SESSION_GAP apart.
+
+    Several at once (two cards refreshing, or renew buttons tapped in quick succession) add up to
+    the dozen quick requests after which the library answers 429, often to the login itself.
+    """
+    site = _SITES.setdefault(base_url, _Site())
+    async with site.lock:
+        loop = asyncio.get_running_loop()
+        if (wait := site.free_at - loop.time()) > 0:
+            await asyncio.sleep(wait)
+        try:
+            yield
+        finally:
+            site.free_at = loop.time() + SESSION_GAP
+
+
+@dataclass
+class _Batch:
+    choosers: list[Callable[["Loan"], bool]] = field(default_factory=list)
+    task: asyncio.Task | None = None
+
+
 class ArenaClient:
     """Logs in and fetches the account overview. One fresh session per fetch,
     so expired sessions never matter."""
@@ -326,11 +363,11 @@ class ArenaClient:
         self.base_url = base_url.rstrip("/")
         self._username = username
         self._pin = pin
+        self._waiting: dict[bool, _Batch] = {}  # by dry_run: renewals waiting for their turn
 
     async def _login(self, session: aiohttp.ClientSession) -> None:
         async with session.get(self.base_url + START_PATH) as resp:
-            if resp.status != 200:
-                raise ArenaError(f"Start page returned HTTP {resp.status}")
+            _check(resp, "Startsidan")
             soup = BeautifulSoup(await resp.text(), "html.parser")
         form = soup.find("form", id=re.compile(r"patronLogin"))
         if form is None or not form.get("action"):
@@ -347,13 +384,12 @@ class ArenaClient:
         data[user_field["name"]] = self._username
         data[pin_field["name"]] = self._pin
         async with session.post(form["action"], data=data) as resp:
-            if resp.status >= 400:
-                raise ArenaError(f"Login returned HTTP {resp.status}")
+            _check(resp, "Inloggningen")
             await resp.read()
 
     async def fetch(self) -> AccountData:
         jar = aiohttp.CookieJar()
-        async with aiohttp.ClientSession(
+        async with _turn(self.base_url), aiohttp.ClientSession(
             cookie_jar=jar, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT
         ) as session:
             try:
@@ -375,9 +411,45 @@ class ArenaClient:
 
     async def renew(
         self,
-        choose,
+        choose: Callable[[Loan], bool],
         dry_run: bool = False,
     ) -> tuple[list[RenewOutcome], AccountData | None]:
+        """Renew the loans `choose(loan)` picks, and return their outcomes and the account after.
+
+        Calls that arrive while this site's previous login is still running join one batch, which
+        renews all their loans in a single login once it is its turn, as when ticking several books
+        on the library's own site. Each call gets the outcomes of its own loans.
+        """
+        batch = self._waiting.get(dry_run)
+        if batch is None:
+            batch = self._waiting[dry_run] = _Batch()
+            batch.task = asyncio.create_task(self._run_batch(batch, dry_run))
+            # Retrieve the exception even if every caller has gone
+            batch.task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        batch.choosers.append(choose)
+        pairs, after = await asyncio.shield(batch.task)
+        return [outcome for loan, outcome in pairs if choose(loan)], after
+
+    async def _run_batch(
+        self, batch: _Batch, dry_run: bool
+    ) -> tuple[list[tuple[Loan, RenewOutcome]], AccountData | None]:
+        try:
+            async with _turn(self.base_url):
+                self._close(batch, dry_run)  # later calls start the next batch
+                choosers = list(batch.choosers)
+                if len(choosers) > 1:
+                    _LOGGER.debug("Arena: renewing %s requests in one login", len(choosers))
+                return await self._renew_now(lambda loan: any(c(loan) for c in choosers), dry_run)
+        finally:
+            self._close(batch, dry_run)
+
+    def _close(self, batch: _Batch, dry_run: bool) -> None:
+        if self._waiting.get(dry_run) is batch:
+            del self._waiting[dry_run]
+
+    async def _renew_now(
+        self, choose: Callable[[Loan], bool], dry_run: bool
+    ) -> tuple[list[tuple[Loan, RenewOutcome]], AccountData | None]:
         """Log in, tick the chosen renewable loans and submit "Låna om" in the same session.
 
         `choose(loan) -> bool` picks loans. Non-renewable loans are reported but never submitted.
@@ -399,8 +471,8 @@ class ArenaClient:
                 before = parse_overview(before_html)
                 soup = BeautifulSoup(before_html, "html.parser")
                 chosen = [l for l in before.loans if choose(l)]
-                outcomes: list[RenewOutcome] = [
-                    RenewOutcome(l.title, False, l.due_date, l.due_date, "Kan inte lånas om (" + (l.status or "spärrad") + ")")
+                outcomes: list[tuple[Loan, RenewOutcome]] = [
+                    (l, RenewOutcome(l.title, False, l.due_date, l.due_date, "Kan inte lånas om (" + (l.status or "spärrad") + ")"))
                     for l in chosen if not l.renewable or not l.checkbox_value
                 ]
                 to_renew = [l for l in chosen if l.renewable and l.checkbox_value]
@@ -413,7 +485,7 @@ class ArenaClient:
                     note = f"{ticked} markerade hos biblioteket, " if ticked is not None else ""
                     _LOGGER.debug("Dry run: would POST %s fields to %s", len(fields), action.split("?")[0])
                     return outcomes + [
-                        RenewOutcome(l.title, False, l.due_date, l.due_date, f"Testkörning – {note}inget skickades")
+                        (l, RenewOutcome(l.title, False, l.due_date, l.due_date, f"Testkörning – {note}inget skickades"))
                         for l in to_renew
                     ], before
                 async with session.post(action, data=fields) as resp:
@@ -440,10 +512,12 @@ class ArenaClient:
             elif new is None:
                 message = "Syns inte längre bland lånen"
             else:
-                # The library's own words, preferably those naming this loan
+                # The library's own words, preferably those naming this loan, never those naming another
                 about = [m for m in feedback if l.title.casefold() in m.casefold()]
-                message = "; ".join(about or feedback) or "Biblioteket lånade inte om boken"
-            outcomes.append(RenewOutcome(l.title, renewed, l.due_date, new_due, message))
+                others = [o.title.casefold() for o in to_renew if o is not l]
+                general = [m for m in feedback if not any(t in m.casefold() for t in others)]
+                message = "; ".join(about or general) or "Biblioteket lånade inte om boken"
+            outcomes.append((l, RenewOutcome(l.title, renewed, l.due_date, new_due, message)))
         return outcomes, after
 
     async def _tick(
