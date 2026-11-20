@@ -73,6 +73,11 @@ markeras lånen först ett i taget, som i en webbläsare, med en sekunds paus me
 Då markerar också en testkörning lånen hos biblioteket och kontrollerar antalet, men skickar
 inget. Markeringarna gäller bara den inloggningen.
 
+Inloggningar till samma bibliotek görs en i taget, med några sekunders paus emellan, eftersom
+biblioteket svarar 429 på för många snabba förfrågningar. Omlån som begärs medan en annan
+inloggning pågår väntar och skickas sedan tillsammans i en inloggning, som när man kryssar i
+flera böcker på bibliotekets webbplats. Varje anrop får svar för sina egna lån.
+
 Efter varje omlån skickas händelsen `arena_bibliotek_renewed` (antal omlånade/misslyckade + detaljer).
 
 ### Exempel: låna om automatiskt och få en notis
